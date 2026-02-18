@@ -1,28 +1,26 @@
 # Map Custom Memo
 
-로컬 서버에서 동작하는 경량(바닐라 JS + Canvas2D) 지도 메모 웹앱입니다.
+브라우저 기반 지도 메모 도구입니다.  
+프로젝트(`.mapproj`)와 업로드한 지도 이미지는 프론트엔드가 아닌 서버의 `/projects/` 경로에서 관리합니다.
 
 ## 실행
 
 ```bash
-python3 -m http.server 4173
-# 브라우저에서 http://localhost:4173 접속
+py server.py 4173
 ```
 
-## 핵심 기능
+브라우저에서 `http://localhost:4173` 접속
 
-- 프로젝트(.mapproj) 생성/불러오기/저장
-- 프로젝트 세션 내 다중 프로젝트 스위칭
-- 지도 이미지 오버레이 편집
-- 레이어 시스템
-  - draw 순서 변경
-  - 레이어 visible / transparency / offset / local rotation / local scale
-  - 뷰 전용 quick visibility / quick transparency
-- 모드
-  - `init-ruler`: 2점 클릭으로 1km 기준 픽셀 거리 저장
-  - `view`: pan/zoom, 거리 측정, 반경 원 측정
-  - `edit`: 마커/텍스트 레이어 인스턴스 추가·이동·삭제 및 속성 편집
+개발 중에는 `index.html`, `app.js`, `styles.css` 변경 시 브라우저가 자동 새로고침됩니다.
 
-## 프로젝트 포맷(.mapproj)
+## 서버 저장 구조
 
-JSON 파일이며 이미지 자체는 저장하지 않고 상대경로(또는 파일명) 문자열만 저장합니다.
+- 프로젝트 파일: `projects/*.mapproj`
+- 이미지 파일: `projects/assets/*`
+
+## 주요 동작
+
+- `서버에 저장` 버튼: 현재 프로젝트를 서버의 `.mapproj` 파일로 저장
+- `서버 목록 새로고침` 버튼: 서버 프로젝트 목록 갱신
+- 왼쪽 프로젝트 목록 클릭: 서버에 저장된 프로젝트 로드
+- 지도 이미지 선택: 서버로 업로드 후 프로젝트의 `map.imagePath`에 서버 경로 저장

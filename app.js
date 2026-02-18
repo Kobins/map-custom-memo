@@ -7,7 +7,6 @@ const ui = {
   mapImageInput: document.getElementById('mapImageInput'),
   saveProjectBtn: document.getElementById('saveProjectBtn'),
   loadProjectBtn: document.getElementById('loadProjectBtn'),
-  loadProjectInput: document.getElementById('loadProjectInput'),
   projectList: document.getElementById('projectList'),
   layerList: document.getElementById('layerList'),
   addMarkerLayerBtn: document.getElementById('addMarkerLayerBtn'),
@@ -26,12 +25,14 @@ const ui = {
 
 const state = {
   projects: [], currentProjectId: null,
+  serverProjects: [],
   view: { x: 0, y: 0, zoom: 1 }, mode: 'view', prevMode: 'view',
   activeLayerId: null, activeInstanceId: null,
   draggingPan: false, dragInstance: null,
   dragOrigin: null,
   temp: { initRulerPoints: [], measureType: null, measurePoints: [] },
-  mapImage: null, quickLayerOverrides: {}
+  mapImage: null, quickLayerOverrides: {},
+  notice: ''
 };
 
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -40,6 +41,8 @@ const defaultCommonLayer = () => ({ visibility: true, transparency: 1, offset: {
 function createProject(name = '새 프로젝트') {
   return {
     id: uid(), name,
+    serverFileName: '',
+    savedToServer: false,
     map: { imagePath: '', width: 0, height: 0 },
     ruler: { pixelsPerKm: Number.NaN },
     layers: []
@@ -60,6 +63,138 @@ function currentProject() { return state.projects.find(p => p.id === state.curre
 function currentLayer() {
   const p = currentProject(); if (!p) return null;
   return p.layers.find(l => l.id === state.activeLayerId) || null;
+}
+
+function projectFileNameFromName(name) {
+  const base = (name || 'project').trim() || 'project';
+  const safe = base.replace(/[\\/:*?"<>|]/g, '_');
+  return safe.endsWith('.mapproj') ? safe : `${safe}.mapproj`;
+}
+
+function displayProjectName(fileName) {
+  return (fileName || '').replace(/\.mapproj$/i, '');
+}
+
+function serializeProject(project) {
+  const cloned = JSON.parse(JSON.stringify(project));
+  delete cloned.serverFileName;
+  delete cloned.savedToServer;
+  return cloned;
+}
+
+function normalizeProject(project, serverFileName = '') {
+  const base = createProject(project?.name || displayProjectName(serverFileName) || '새 프로젝트');
+  const merged = {
+    ...base,
+    ...project,
+    id: project?.id || uid(),
+    name: project?.name || base.name,
+    serverFileName: serverFileName || projectFileNameFromName(project?.name || base.name),
+    savedToServer: true,
+    map: { ...base.map, ...(project?.map || {}) },
+    ruler: { ...base.ruler, ...(project?.ruler || {}) },
+    layers: Array.isArray(project?.layers) ? project.layers : []
+  };
+  return merged;
+}
+
+function resolveMapImagePath(path) {
+  if (!path) return '';
+  if (path.startsWith('http://') || path.startsWith('https://')) return path;
+  if (path.startsWith('/')) return path;
+  if (path.startsWith('projects/')) return `/${path}`;
+  return `/projects/assets/${path}`;
+}
+
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error(`이미지를 불러오지 못했습니다: ${src}`));
+    img.src = src;
+  });
+}
+
+async function requestJson(url, options = {}) {
+  const res = await fetch(url, options);
+  const text = await res.text();
+  let data = {};
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      if (!res.ok) throw new Error(text);
+    }
+  }
+  if (!res.ok) {
+    throw new Error(data.error || `${res.status} ${res.statusText}`);
+  }
+  return data;
+}
+
+function setNotice(message = '') {
+  state.notice = message;
+}
+
+async function refreshServerProjects() {
+  const data = await requestJson('/api/projects');
+  state.serverProjects = Array.isArray(data.projects) ? data.projects : [];
+  renderProjectList();
+}
+
+async function saveProjectToServer(project) {
+  project.serverFileName = projectFileNameFromName(project.serverFileName || project.name);
+  const payload = serializeProject(project);
+  const result = await requestJson(`/api/projects/${encodeURIComponent(project.serverFileName)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload, null, 2)
+  });
+  project.serverFileName = result.file || project.serverFileName;
+  project.savedToServer = true;
+}
+
+async function loadProjectFromServer(fileName) {
+  const projectData = await requestJson(`/api/projects/${encodeURIComponent(fileName)}`);
+  const loaded = normalizeProject(projectData, fileName);
+  const idx = state.projects.findIndex(p => p.serverFileName === fileName);
+  if (idx >= 0) state.projects[idx] = loaded;
+  else state.projects.push(loaded);
+
+  state.currentProjectId = loaded.id;
+  state.activeLayerId = loaded.layers[0]?.id || null;
+  state.activeInstanceId = null;
+  state.quickLayerOverrides = {};
+  await loadMapImageForCurrentProject();
+  renderUi();
+}
+
+async function uploadMapImageToServer(file) {
+  const form = new FormData();
+  form.append('image', file, file.name);
+  return requestJson('/api/images', { method: 'POST', body: form });
+}
+
+async function loadMapImageForCurrentProject() {
+  const p = currentProject();
+  if (!p || !p.map.imagePath) {
+    state.mapImage = null;
+    return;
+  }
+  const src = resolveMapImagePath(p.map.imagePath);
+  state.mapImage = await loadImage(src);
+  if (!p.map.width || !p.map.height) {
+    p.map.width = state.mapImage.width;
+    p.map.height = state.mapImage.height;
+  }
+}
+
+function fitMapToView() {
+  const p = currentProject();
+  if (!p || !p.map.width || !p.map.height) return;
+  state.view.x = 0;
+  state.view.y = 0;
+  state.view.zoom = Math.min(canvas.width / p.map.width, canvas.height / p.map.height);
 }
 
 function resizeCanvasToDisplay() {
@@ -265,22 +400,39 @@ function setMode(mode) {
 
 function updateStatus() {
   const p = currentProject();
-  const kmLabel = (!p || Number.isNaN(p.ruler.pixelsPerKm)) ? 'ruler 미설정' : `1km=${p.ruler.pixelsPerKm.toFixed(2)}px`;
+  const kmLabel = (!p || p.ruler.pixelsPerKm == null || Number.isNaN(p.ruler.pixelsPerKm)) ? 'ruler 미설정' : `1km=${p.ruler.pixelsPerKm.toFixed(2)}px`;
   let measure = '';
   if (state.temp.measurePoints.length === 2 && p && !Number.isNaN(p.ruler.pixelsPerKm)) {
     const dPx = Math.hypot(state.temp.measurePoints[0].x - state.temp.measurePoints[1].x, state.temp.measurePoints[0].y - state.temp.measurePoints[1].y);
     measure = ` / 측정: ${(dPx / p.ruler.pixelsPerKm).toFixed(3)} km`;
   }
-  ui.statusBar.textContent = `mode=${state.mode} zoom=${state.view.zoom.toFixed(2)} ${kmLabel}${measure}`;
+  const notice = state.notice ? ` / ${state.notice}` : '';
+  ui.statusBar.textContent = `mode=${state.mode} zoom=${state.view.zoom.toFixed(2)} ${kmLabel}${measure}${notice}`;
 }
 
 function renderProjectList() {
   ui.projectList.innerHTML = '';
-  for (const p of state.projects) {
+  const current = currentProject();
+
+  if (current && !current.savedToServer) {
     const li = document.createElement('li');
-    li.className = p.id === state.currentProjectId ? 'active' : '';
-    li.textContent = `${p.name} (${p.layers.length} layers)`;
-    li.onclick = () => { state.currentProjectId = p.id; state.activeLayerId = p.layers[0]?.id || null; state.activeInstanceId = null; renderUi(); };
+    li.className = 'active';
+    li.textContent = `${current.name} (로컬, 미저장)`;
+    ui.projectList.appendChild(li);
+  }
+
+  for (const fileName of state.serverProjects) {
+    const loaded = state.projects.find(p => p.serverFileName === fileName);
+    const li = document.createElement('li');
+    li.className = current?.serverFileName === fileName ? 'active' : '';
+    li.textContent = loaded ? `${loaded.name} (${loaded.layers.length} layers)` : `${displayProjectName(fileName)} (server)`;
+    li.onclick = () => { void loadProjectFromServer(fileName).catch((err) => { setNotice(err.message); renderUi(); }); };
+    ui.projectList.appendChild(li);
+  }
+
+  if (!current && state.serverProjects.length === 0) {
+    const li = document.createElement('li');
+    li.textContent = '저장된 프로젝트가 없습니다.';
     ui.projectList.appendChild(li);
   }
 }
@@ -322,10 +474,18 @@ function numberInput(label, value, oninput, step = '0.1') {
   return `<label>${label}<input type="number" step="${step}" value="${value}" data-field="${oninput}"/></label>`;
 }
 
+function escapeHtmlAttr(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;');
+}
+
 function renderLayerEditor() {
   const l = currentLayer();
   if (!l) { ui.layerEditor.textContent = '레이어를 선택하세요.'; return; }
-  ui.layerEditor.innerHTML = `${numberInput('Transparency', l.common.transparency, 'c.transparency', '0.01')}
+  ui.layerEditor.innerHTML = `<label>Layer Name<input data-field="l.name" value="${escapeHtmlAttr(l.name)}"/></label>
+    ${numberInput('Transparency', l.common.transparency, 'c.transparency', '0.01')}
     ${numberInput('Offset X', l.common.offset.x, 'c.offset.x')}
     ${numberInput('Offset Y', l.common.offset.y, 'c.offset.y')}
     ${numberInput('Local Rotation', l.common.localRotationPerInstance, 'c.localRotationPerInstance')}
@@ -349,6 +509,7 @@ function renderLayerEditor() {
       const path = el.dataset.field;
       const v = el.type === 'checkbox' ? el.checked : el.value;
       applyPath(l, path, v);
+      if (path === 'l.name') renderLayerList();
       draw();
     };
   });
@@ -357,7 +518,8 @@ function renderLayerEditor() {
 function applyPath(layer, path, v) {
   const num = ['transparency','offset.x','offset.y','localRotationPerInstance','localScalePerInstance','outlineWidth'];
   const norm = num.some(x => path.includes(x)) ? Number(v) : v;
-  if (path === 'c.transparency') layer.common.transparency = norm;
+  if (path === 'l.name') layer.name = String(v ?? '');
+  else if (path === 'c.transparency') layer.common.transparency = norm;
   else if (path === 'c.offset.x') layer.common.offset.x = norm;
   else if (path === 'c.offset.y') layer.common.offset.y = norm;
   else if (path === 'c.localRotationPerInstance') layer.common.localRotationPerInstance = norm;
@@ -492,27 +654,44 @@ canvas.addEventListener('wheel', (e) => {
 
 ui.newProjectBtn.onclick = () => {
   const p = createProject(ui.projectNameInput.value.trim() || undefined);
+  p.serverFileName = projectFileNameFromName(p.name);
+  p.savedToServer = false;
   state.projects.push(p);
   state.currentProjectId = p.id;
   state.activeLayerId = null;
+  state.mapImage = null;
+  state.quickLayerOverrides = {};
+  setNotice('새 로컬 프로젝트를 만들었습니다. 서버에 저장하면 목록에 나타납니다.');
   renderUi();
 };
 ui.projectNameInput.oninput = () => {
-  const p = currentProject(); if (p) p.name = ui.projectNameInput.value;
+  const p = currentProject();
+  if (p) {
+    p.name = ui.projectNameInput.value;
+    if (!p.savedToServer) {
+      p.serverFileName = projectFileNameFromName(p.name);
+    }
+  }
   renderProjectList();
 };
-ui.mapImageInput.onchange = () => {
+ui.mapImageInput.onchange = async () => {
   const file = ui.mapImageInput.files?.[0];
   const p = currentProject(); if (!file || !p) return;
-  const img = new Image();
-  img.onload = () => {
-    p.map.width = img.width; p.map.height = img.height; p.map.imagePath = file.name;
-    state.mapImage = img;
-    state.view.x = 0; state.view.y = 0;
-    state.view.zoom = Math.min(canvas.width / img.width, canvas.height / img.height);
+  try {
+    const result = await uploadMapImageToServer(file);
+    p.map.imagePath = result.path || '';
+    p.map.width = Number(result.width) || 0;
+    p.map.height = Number(result.height) || 0;
+    await loadMapImageForCurrentProject();
+    fitMapToView();
+    setNotice('지도 이미지를 서버에 업로드했습니다.');
     renderUi();
-  };
-  img.src = URL.createObjectURL(file);
+  } catch (err) {
+    setNotice(`이미지 업로드 실패: ${err.message}`);
+    renderUi();
+  } finally {
+    ui.mapImageInput.value = '';
+  }
 };
 ui.addMarkerLayerBtn.onclick = () => {
   const p = currentProject(); if (!p) return;
@@ -535,33 +714,59 @@ ui.quickAlpha.oninput = () => {
   state.quickLayerOverrides[l.id] = { ...(state.quickLayerOverrides[l.id] || {}), transparency: Number(ui.quickAlpha.value) };
   draw();
 };
-ui.measureLineBtn.onclick = () => { state.temp.measureType = 'line'; state.temp.measurePoints = []; setMode('view'); draw(); };
-ui.measureRadiusBtn.onclick = () => { state.temp.measureType = 'radius'; state.temp.measurePoints = []; setMode('view'); draw(); };
+ui.measureLineBtn.onclick = () => { setMode('view'); state.temp.measureType = 'line'; state.temp.measurePoints = []; draw(); };
+ui.measureRadiusBtn.onclick = () => { setMode('view'); state.temp.measureType = 'radius'; state.temp.measurePoints = []; draw(); };
 ui.clearMeasureBtn.onclick = () => { state.temp.measureType = null; state.temp.measurePoints = []; draw(); };
 
-ui.saveProjectBtn.onclick = () => {
+ui.saveProjectBtn.onclick = async () => {
   const p = currentProject(); if (!p) return;
-  const blob = new Blob([JSON.stringify(p, null, 2)], { type: 'application/json' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `${p.name || 'project'}.mapproj`;
-  a.click();
-  URL.revokeObjectURL(a.href);
+  try {
+    await saveProjectToServer(p);
+    await refreshServerProjects();
+    setNotice(`서버 저장 완료: ${p.serverFileName}`);
+    renderUi();
+  } catch (err) {
+    setNotice(`서버 저장 실패: ${err.message}`);
+    renderUi();
+  }
 };
-ui.loadProjectBtn.onclick = () => ui.loadProjectInput.click();
-ui.loadProjectInput.onchange = async () => {
-  const file = ui.loadProjectInput.files?.[0]; if (!file) return;
-  const p = JSON.parse(await file.text());
-  p.id = uid();
-  state.projects.push(p);
-  state.currentProjectId = p.id;
-  state.activeLayerId = p.layers[0]?.id || null;
-  renderUi();
+ui.loadProjectBtn.onclick = async () => {
+  try {
+    await refreshServerProjects();
+    if (state.serverProjects.length > 0 && (!currentProject() || !currentProject().savedToServer)) {
+      await loadProjectFromServer(state.serverProjects[0]);
+      setNotice(`서버 프로젝트 로드: ${state.serverProjects[0]}`);
+    } else {
+      setNotice('서버 목록을 새로고침했습니다.');
+      renderUi();
+    }
+  } catch (err) {
+    setNotice(`서버 목록 조회 실패: ${err.message}`);
+    renderUi();
+  }
 };
 
 window.addEventListener('resize', draw);
 
-state.projects.push(createProject('Demo Project'));
-state.currentProjectId = state.projects[0].id;
-renderUi();
+async function bootstrap() {
+  try {
+    await refreshServerProjects();
+    if (state.serverProjects.length > 0) {
+      await loadProjectFromServer(state.serverProjects[0]);
+      setNotice(`서버 프로젝트 로드: ${state.serverProjects[0]}`);
+      renderUi();
+      return;
+    }
+  } catch (err) {
+    setNotice(`서버 연결 실패: ${err.message}`);
+  }
+
+  const initial = createProject('Demo Project');
+  initial.serverFileName = projectFileNameFromName(initial.name);
+  state.projects = [initial];
+  state.currentProjectId = initial.id;
+  renderUi();
+}
+
+void bootstrap();
 

@@ -12,8 +12,8 @@
       <button id="newProjectBtn">새 프로젝트</button>
       <input id="projectNameInput" placeholder="프로젝트 이름" />
       <label class="file-label">지도 이미지<input id="mapImageInput" type="file" accept="image/*" /></label>
-      <button id="loadProjectBtn">.mapproj 불러오기</button>
-      <button id="saveProjectBtn">.mapproj 저장</button>
+      <button id="loadProjectBtn">서버 목록 새로고침</button>
+      <button id="saveProjectBtn">서버에 저장</button>
     </div>
     <div class="group">
       <span>모드</span>
@@ -27,7 +27,7 @@
   <main class="layout">
     <aside class="sidebar left">
       <section>
-        <h3>프로젝트 목록(세션)</h3>
+        <h3>프로젝트 목록(서버)</h3>
         <ul id="projectList"></ul>
       </section>
       <section>
@@ -65,7 +65,12 @@
     </aside>
   </main>
 
-  <input id="loadProjectInput" type="file" accept=".mapproj,application/json" hidden />
+  <script>
+    if ('EventSource' in window && (location.hostname === 'localhost' || location.hostname === '127.0.0.1')) {
+      const source = new EventSource('/__live');
+      source.addEventListener('reload', () => window.location.reload());
+    }
+  </script>
   <script type="module" src="app.js"></script>
 </body>
 </html>
